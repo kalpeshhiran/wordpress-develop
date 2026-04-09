@@ -132,10 +132,10 @@ function get_option( $option, $default_value = false ) {
 	$pre = apply_filters( "pre_option_{$option}", false, $option, $default_value );
 
 	/**
-	 * Filters the value of all existing options before it is retrieved.
+	 * Filters the value of any existing option before it is retrieved.
 	 *
-	 * Returning a truthy value from the filter will effectively short-circuit retrieval
-	 * and return the passed value instead.
+	 * Returning a value other than false from the filter will short-circuit retrieval
+	 * and return that value instead.
 	 *
 	 * @since 6.1.0
 	 *
@@ -240,12 +240,28 @@ function get_option( $option, $default_value = false ) {
 		$value = untrailingslashit( $value );
 	}
 
+	$raw_value = $value;
+	$value     = maybe_unserialize( $value );
+
+	/*
+	 * If the stored value was serialized but could not be unserialized, `maybe_unserialize()`
+	 * returns `false`. In that case, return the default value to avoid incorrectly returning
+	 * `false` instead of the caller's expected default.
+	 *
+	 * Note: `b:0;` is the valid serialization of boolean `false`. When properly unserialized
+	 * it returns `false`, which is correct and should not be treated as a failure.
+	 */
+	if ( false === $value && is_serialized( $raw_value ) && 'b:0;' !== trim( $raw_value ) ) {
+		/** This filter is documented in wp-includes/option.php */
+		return apply_filters( "default_option_{$option}", $default_value, $option, $passed_default );
+	}
+
 	/**
 	 * Filters the value of an existing option.
 	 *
 	 * The dynamic portion of the hook name, `$option`, refers to the option name.
 	 *
-	 * @since 1.5.0 As 'option_' . $setting
+	 * @since 1.5.0 As `option_{$setting}`.
 	 * @since 3.0.0
 	 * @since 4.4.0 The `$option` parameter was added.
 	 *
@@ -253,7 +269,7 @@ function get_option( $option, $default_value = false ) {
 	 *                       unserialized prior to being returned.
 	 * @param string $option Option name.
 	 */
-	return apply_filters( "option_{$option}", maybe_unserialize( $value ), $option );
+	return apply_filters( "option_{$option}", $value, $option );
 }
 
 /**
@@ -547,10 +563,7 @@ function wp_set_options_autoload( array $options, $autoload ) {
  */
 function wp_set_option_autoload( $option, $autoload ) {
 	$result = wp_set_option_autoload_values( array( $option => $autoload ) );
-	if ( isset( $result[ $option ] ) ) {
-		return $result[ $option ];
-	}
-	return false;
+	return $result[ $option ] ?? false;
 }
 
 /**
@@ -1325,10 +1338,11 @@ function wp_determine_option_autoload_value( $option, $value, $serialized_value,
 	 *
 	 * @since 6.6.0
 	 *
-	 * @param bool|null $autoload The default autoload value to set. Returning true will be set as 'auto-on' in the
-	 *                            database, false will be set as 'auto-off', and null will be set as 'auto'.
-	 * @param string    $option   The passed option name.
-	 * @param mixed     $value    The passed option value to be saved.
+	 * @param bool|null $autoload         The default autoload value to set. Returning true will be set as 'auto-on' in the
+	 *                                    database, false will be set as 'auto-off', and null will be set as 'auto'.
+	 * @param string    $option           The passed option name.
+	 * @param mixed     $value            The passed option value to be saved.
+	 * @param mixed     $serialized_value The passed option value to be saved, in serialized form.
 	 */
 	$autoload = apply_filters( 'wp_default_autoload_value', null, $option, $value, $serialized_value );
 	if ( is_bool( $autoload ) ) {
@@ -1629,9 +1643,9 @@ function set_transient( $transient, $value, $expiration = 0 ) {
  * The multi-table delete syntax is used to delete the transient record
  * from table a, and the corresponding transient_timeout record from table b.
  *
- * @global wpdb $wpdb WordPress database abstraction object.
- *
  * @since 4.9.0
+ *
+ * @global wpdb $wpdb WordPress database abstraction object.
  *
  * @param bool $force_db Optional. Force cleanup to run against the database even when an external object cache is used.
  */
@@ -1669,7 +1683,7 @@ function delete_expired_transients( $force_db = false ) {
 				time()
 			)
 		);
-	} elseif ( is_multisite() && is_main_site() && is_main_network() ) {
+	} elseif ( is_main_site() && is_main_network() ) {
 		// Multisite stores site transients in the sitemeta table.
 		$wpdb->query(
 			$wpdb->prepare(
@@ -1754,7 +1768,7 @@ function wp_user_settings() {
 function get_user_setting( $name, $default_value = false ) {
 	$all_user_settings = get_all_user_settings();
 
-	return isset( $all_user_settings[ $name ] ) ? $all_user_settings[ $name ] : $default_value;
+	return $all_user_settings[ $name ] ?? $default_value;
 }
 
 /**
@@ -1880,7 +1894,7 @@ function wp_set_all_user_settings( $user_settings ) {
 	}
 
 	if ( ! is_user_member_of_blog() ) {
-		return;
+		return null;
 	}
 
 	$settings = '';
@@ -2020,7 +2034,7 @@ function get_network_option( $network_id, $option, $default_value = false ) {
 	 * Returning a value other than false from the filter will short-circuit retrieval
 	 * and return that value instead.
 	 *
-	 * @since 2.9.0 As 'pre_site_option_' . $key
+	 * @since 2.9.0 As `pre_site_option_{$key}`.
 	 * @since 3.0.0
 	 * @since 4.4.0 The `$option` parameter was added.
 	 * @since 4.7.0 The `$network_id` parameter was added.
@@ -2036,6 +2050,25 @@ function get_network_option( $network_id, $option, $default_value = false ) {
 	 *                                Default false.
 	 */
 	$pre = apply_filters( "pre_site_option_{$option}", false, $option, $network_id, $default_value );
+
+	/**
+	 * Filters the value of any existing network option before it is retrieved.
+	 *
+	 * Returning a value other than false from the filter will short-circuit retrieval
+	 * and return that value instead.
+	 *
+	 * @since 6.9.0
+	 *
+	 * @param mixed  $pre_option    The value to return instead of the network option value. This differs
+	 *                              from `$default_value`, which is used as the fallback value in the event
+	 *                              the option doesn't exist elsewhere in get_network_option().
+	 *                              Default false (to skip past the short-circuit).
+	 * @param string $option        Name of the option.
+	 * @param int    $network_id    ID of the network.
+	 * @param mixed  $default_value The fallback value to return if the option does not exist.
+	 *                              Default false.
+	 */
+	$pre = apply_filters( 'pre_site_option', $pre, $option, $network_id, $default_value );
 
 	if ( false !== $pre ) {
 		return $pre;
@@ -2104,7 +2137,7 @@ function get_network_option( $network_id, $option, $default_value = false ) {
 	 *
 	 * The dynamic portion of the hook name, `$option`, refers to the option name.
 	 *
-	 * @since 2.9.0 As 'site_option_' . $key
+	 * @since 2.9.0 As `site_option_{$key}`.
 	 * @since 3.0.0
 	 * @since 4.4.0 The `$option` parameter was added.
 	 * @since 4.7.0 The `$network_id` parameter was added.
@@ -2153,7 +2186,7 @@ function add_network_option( $network_id, $option, $value ) {
 	 *
 	 * The dynamic portion of the hook name, `$option`, refers to the option name.
 	 *
-	 * @since 2.9.0 As 'pre_add_site_option_' . $key
+	 * @since 2.9.0 As `pre_add_site_option_{$key}`.
 	 * @since 3.0.0
 	 * @since 4.4.0 The `$option` parameter was added.
 	 * @since 4.7.0 The `$network_id` parameter was added.
@@ -2217,7 +2250,7 @@ function add_network_option( $network_id, $option, $value ) {
 		 *
 		 * The dynamic portion of the hook name, `$option`, refers to the option name.
 		 *
-		 * @since 2.9.0 As "add_site_option_{$key}"
+		 * @since 2.9.0 As `add_site_option_{$key}`.
 		 * @since 3.0.0
 		 * @since 4.7.0 The `$network_id` parameter was added.
 		 *
@@ -2323,7 +2356,7 @@ function delete_network_option( $network_id, $option ) {
 		 *
 		 * The dynamic portion of the hook name, `$option`, refers to the option name.
 		 *
-		 * @since 2.9.0 As "delete_site_option_{$key}"
+		 * @since 2.9.0 As `delete_site_option_{$key}`.
 		 * @since 3.0.0
 		 * @since 4.7.0 The `$network_id` parameter was added.
 		 *
@@ -2865,6 +2898,18 @@ function register_initial_settings() {
 			'show_in_rest' => true,
 			'type'         => 'string',
 			'description'  => __( 'Default post format.' ),
+		)
+	);
+
+	register_setting(
+		'writing',
+		'wp_collaboration_enabled',
+		array(
+			'type'              => 'boolean',
+			'description'       => __( 'Enable Real-Time Collaboration' ),
+			'sanitize_callback' => 'rest_sanitize_boolean',
+			'default'           => false,
+			'show_in_rest'      => true,
 		)
 	);
 
